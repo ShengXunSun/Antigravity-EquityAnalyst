@@ -1,0 +1,11 @@
+{
+  "name": "antigravity-equity-analyst",
+  "version": "1.0.0",
+  "description": "v1.0 Institutional secondary-market equity research pipeline: IPS mandate builder, hybrid Top-Down/Bottom-Up screener with Pro audit, SEC EDGAR fundamental analyst, 100% live-formula 5-year Excel DCF/DDM/AFFO/Comps builder, and audited PDF initiation reports.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Set up my client Investment Policy Statement (client_ips.md) for equity research",
+    "Run the full equity research pipeline from IPS screening to Excel valuation and report",
+    "Analyze MSFT from SEC 10-K/10-Q filings, build an Excel DCF/Comps model, and write an initiation report"
+  ]
+}

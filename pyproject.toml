@@ -1,0 +1,22 @@
+[project]
+name = "antigravity-equity-analyst"
+version = "1.0.0"
+description = "Standalone Google Antigravity skill suite and PEP 723 Python toolkit for secondary-market equity research (v1.0)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31.0",
+    "yfinance>=0.2.50",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "openpyxl>=3.1.5",
+    "pyyaml>=6.0.1",
+    "markdown>=3.6",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "reportlab>=4.2.0",
+]
+
+[tool.uv]
+package = false

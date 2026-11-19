@@ -24,34 +24,65 @@ import pandas as pd
 # Allow sibling imports whether invoked from repo root or scripts folder
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ips_parser import load_ips  # noqa: E402
-from market_data import fetch_snapshot  # noqa: E402
+from market_data import fetch_interest_coverage, fetch_snapshot  # noqa: E402
 
-# Balanced liquid US + SEC-reporting ADR representative universe across all 11 GICS sectors
-DEFAULT_UNIVERSE: list[str] = [
-    # Information Technology & Semis (incl. ADRs)
+# Balanced liquid US, ADR, and HKEX representative universes across GICS sectors
+US_UNIVERSE: list[str] = [
+    # Information Technology & Semis
     "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "ACN", "CSCO",
-    "TXN", "QCOM", "INTU", "AMAT", "LRCX", "KLAC", "NOW", "PANW", "SNPS", "TSM", "ASML", "SAP",
-    # Communication Services
-    "GOOGL", "META", "NFLX", "TMUS", "DIS", "VZ", "T", "CMCSA", "SPOT",
-    # Consumer Discretionary
-    "AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "BKNG", "TJX", "SBUX", "CMG", "ORLY", "AZO",
+    "TXN", "QCOM", "INTU", "AMAT", "LRCX", "KLAC", "NOW", "PANW", "SNPS", "ANET", "CRWD", "MU", "DELL", "APP", "PLTR",
+    # Communication Services & Digital Platforms
+    "GOOGL", "META", "NFLX", "TMUS", "DIS", "VZ", "T", "CMCSA",
+    # Consumer Discretionary & Marketplaces
+    "AMZN", "TSLA", "HD", "MCD", "NKE", "LOW", "BKNG", "TJX", "SBUX", "CMG", "ORLY", "AZO", "UBER", "DASH", "DECK", "LULU",
     # Consumer Staples
     "COST", "PG", "WMT", "KO", "PEP", "PM", "MDLZ", "CL", "MNST",
-    # Healthcare (incl. ADRs)
-    "LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "DHR", "ISRG", "SYK", "AMGN", "VRTX", "REGN", "NVO",
+    # Healthcare
+    "LLY", "UNH", "JNJ", "ABBV", "MRK", "TMO", "ABT", "DHR", "ISRG", "SYK", "AMGN", "VRTX", "REGN",
     # Industrials
-    "CAT", "GE", "RTX", "HON", "UNP", "ETN", "DE", "ADP", "LMT", "WM", "ITW", "PH", "TT", "CTAS",
-    # Financials
-    "BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "SPGI", "BLK", "AXP", "PGR", "CB", "MMC",
-    # Energy
+    "CAT", "GE", "RTX", "HON", "UNP", "ETN", "DE", "ADP", "LMT", "WM", "ITW", "PH", "TT", "CTAS", "VRT",
+    # Financials, Insurance & Payments
+    "BRK-B", "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "SPGI", "BLK", "AXP", "PGR", "CB", "MMC", "KKR", "BX", "SCHW", "PYPL", "HOOD",
+    # Energy, Materials, Real Estate, Utilities
     "XOM", "CVX", "COP", "EOG", "SLB", "MPC", "PSX",
-    # Materials
     "LIN", "SHW", "APD", "ECL", "FCX", "NEM", "VMC",
-    # Real Estate (REITs)
     "PLD", "AMT", "EQIX", "WELL", "SPG", "O", "PSA",
-    # Utilities
     "NEE", "SO", "DUK", "CEG", "AEP", "SRE",
 ]
+
+ADR_UNIVERSE: list[str] = [
+    "TSM", "ASML", "SAP", "SPOT", "NVO", "ARM", "MELI",
+]
+
+HK_UNIVERSE: list[str] = [
+    # HKEX Technology, Semis & Hardware
+    "0981.HK", "0992.HK", "0285.HK", "2382.HK", "1810.HK",
+    # HKEX Communication Services & Internet Platforms
+    "0700.HK", "9999.HK", "1024.HK", "9888.HK",
+    # HKEX Consumer Discretionary & Staples
+    "9988.HK", "3690.HK", "9618.HK", "9961.HK", "1211.HK", "2020.HK", "9987.HK",
+    "6690.HK", "0300.HK", "9992.HK", "9633.HK", "0291.HK",
+    # HKEX Financials, Exchanges & Insurance
+    "1299.HK", "0388.HK", "0005.HK", "2318.HK", "3968.HK", "2388.HK",
+    # HKEX Industrials & Healthcare
+    "0669.HK", "2269.HK", "1093.HK",
+]
+
+DEFAULT_UNIVERSE: list[str] = US_UNIVERSE + ADR_UNIVERSE
+
+
+def _resolve_default_universe(regions: list[str] | None) -> list[str]:
+    if not regions:
+        return DEFAULT_UNIVERSE
+    reg_norm = {str(r).strip().upper() for r in regions if str(r).strip()}
+    pool: list[str] = []
+    if "US" in reg_norm or "GLOBAL" in reg_norm:
+        pool.extend(US_UNIVERSE)
+    if any(r in reg_norm for r in ("ADR", "ADR_DEVELOPED", "GLOBAL")):
+        pool.extend(ADR_UNIVERSE)
+    if any(r in reg_norm for r in ("HK", "HKEX", "HONG KONG", "GLOBAL")):
+        pool.extend(HK_UNIVERSE)
+    return pool or DEFAULT_UNIVERSE
 
 LEVERAGE_EXEMPT_SECTORS = {"Financial Services", "Financials", "Real Estate"}
 
@@ -74,10 +105,11 @@ def run_hybrid_screen(
     max_workers: int = 8,
 ) -> dict[str, Any]:
     ips = load_ips(ips_path)
-    universe_list = list(dict.fromkeys(t.upper().strip() for t in (tickers or DEFAULT_UNIVERSE) if t.strip()))
+    uni_cfg = ips["universe"]
+    default_pool = _resolve_default_universe(uni_cfg.get("regions"))
+    universe_list = list(dict.fromkeys(t.upper().strip() for t in (tickers or default_pool) if t.strip()))
 
     hf = ips["hard_filters"]
-    uni_cfg = ips["universe"]
     sw = ips["style_weights"]
 
     excluded_tickers = {t.upper() for t in (uni_cfg.get("excluded_tickers") or [])}
@@ -101,13 +133,17 @@ def run_hybrid_screen(
                 fetch_errors.append({"ticker": tk, "error": str(exc)})
 
     survivors: list[dict[str, Any]] = []
+    missing_beta_tickers: list[str] = []
+    ic_rejected_tickers: list[dict[str, Any]] = []
     rejections: dict[str, int] = {
         "excluded_ticker": 0,
         "excluded_sector_or_industry": 0,
         "below_min_market_cap": 0,
         "below_min_liquidity": 0,
+        "missing_beta": 0,
         "above_max_beta": 0,
         "above_max_leverage": 0,
+        "below_min_interest_coverage": 0,
         "negative_fcf": 0,
     }
 
@@ -115,6 +151,7 @@ def run_hybrid_screen(
     min_adv = float(hf.get("min_avg_daily_dollar_vol_m", 0))
     max_beta = hf.get("max_beta")
     max_nd_ebitda = hf.get("max_net_debt_to_ebitda")
+    min_int_cov = hf.get("min_interest_coverage")
     req_pos_fcf = bool(hf.get("require_positive_fcf", False))
 
     for s in raw_snapshots:
@@ -141,9 +178,14 @@ def run_hybrid_screen(
         if adv < min_adv:
             rejections["below_min_liquidity"] += 1
             continue
-        if max_beta is not None and beta is not None and beta > float(max_beta):
-            rejections["above_max_beta"] += 1
-            continue
+        if max_beta is not None:
+            if beta is None:
+                rejections["missing_beta"] += 1
+                missing_beta_tickers.append(tk)
+                continue
+            if beta > float(max_beta):
+                rejections["above_max_beta"] += 1
+                continue
         if (
             max_nd_ebitda is not None
             and sec not in LEVERAGE_EXEMPT_SECTORS
@@ -246,23 +288,58 @@ def run_hybrid_screen(
 
     df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
 
-    # Cap max 2 finalists per identical industry to avoid single-industry crowding
-    finalist_rows: list[dict[str, Any]] = []
-    industry_counts: dict[str, int] = {}
+    # Enforce min_interest_coverage on top non-financial contenders before picking finalists/top-20
+    top_pool_n = min(len(df), max(top_n * 6, 30))
+    cov_map: dict[str, float | None] = {}
+    if min_int_cov is not None and top_pool_n > 0:
+        check_tks = [
+            str(df.iloc[i]["ticker"])
+            for i in range(top_pool_n)
+            if str(df.iloc[i]["sector"]) not in LEVERAGE_EXEMPT_SECTORS
+        ]
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            fut_cov = {pool.submit(fetch_interest_coverage, tk): tk for tk in check_tks}
+            for fut in as_completed(fut_cov):
+                tk_c = fut_cov[fut]
+                try:
+                    cov_map[tk_c] = fut.result()
+                except Exception:
+                    cov_map[tk_c] = None
+
+    filtered_recs: list[dict[str, Any]] = []
     for _, row in df.iterrows():
-        ind_name = str(row["industry"] or "Unknown")
-        if industry_counts.get(ind_name, 0) >= 2:
-            continue
-        industry_counts[ind_name] = industry_counts.get(ind_name, 0) + 1
         rec = row.where(pd.notnull(row), None).to_dict()
+        tk_r = str(rec["ticker"])
+        sec_r = str(rec.get("sector") or "")
+        cov = cov_map.get(tk_r)
+        rec["interest_coverage"] = cov
+        if (
+            min_int_cov is not None
+            and sec_r not in LEVERAGE_EXEMPT_SECTORS
+            and cov is not None
+            and cov < float(min_int_cov)
+        ):
+            rejections["below_min_interest_coverage"] += 1
+            ic_rejected_tickers.append({"ticker": tk_r, "interest_coverage": cov})
+            continue
         for sc in ("q_score", "v_score", "g_score", "s_score", "bottom_up_score", "top_down_adjustment", "composite_score"):
             if rec.get(sc) is not None:
                 rec[sc] = round(float(rec[sc]), 4)
+        filtered_recs.append(rec)
+
+    # Cap max 2 finalists per identical industry to avoid single-industry crowding
+    finalist_rows: list[dict[str, Any]] = []
+    industry_counts: dict[str, int] = {}
+    for rec in filtered_recs:
+        ind_name = str(rec["industry"] or "Unknown")
+        if industry_counts.get(ind_name, 0) >= 2:
+            continue
+        industry_counts[ind_name] = industry_counts.get(ind_name, 0) + 1
         finalist_rows.append(rec)
         if len(finalist_rows) >= top_n:
             break
 
-    top_20 = df.head(20).where(pd.notnull(df.head(20)), None).to_dict(orient="records")
+    top_20 = filtered_recs[:20]
     return {
         "ips_risk_tolerance": ips["return_and_risk"]["risk_tolerance"],
         "ips_benchmark": ips["benchmark_and_hurdles"]["benchmark_ticker"],
@@ -271,8 +348,10 @@ def run_hybrid_screen(
         "universe_requested": len(universe_list),
         "universe_evaluated": len(raw_snapshots),
         "fetch_errors_count": len(fetch_errors),
+        "missing_beta_tickers": sorted(missing_beta_tickers),
+        "interest_coverage_rejected": ic_rejected_tickers,
         "hard_filter_rejections": rejections,
-        "survivors_count": len(df),
+        "survivors_count": len(filtered_recs),
         "finalists": finalist_rows,
         "top_20_leaderboard": top_20,
     }

@@ -144,6 +144,19 @@ def _extract_pillar_block(sec7_text: str, pillar_id: str) -> str:
     return "\n".join(lines[start_idx:end_idx])
 
 
+def _currency_symbol(currency: str) -> str:
+    code = (currency or "USD").strip().upper()
+    return {
+        "USD": "$",
+        "HKD": "HK$",
+        "CNY": "RMB ",
+        "RMB": "RMB ",
+        "EUR": "€",
+        "GBP": "£",
+        "JPY": "¥",
+    }.get(code, f"{code} ")
+
+
 def _number_appears(text: str, target: float, pct: bool = False) -> bool:
     """Check if target (or standard 1- or 2-decimal rounded string) appears in report text."""
     candidates = {
@@ -171,6 +184,7 @@ def audit_report(report_md_path: Path, valuation_summary_path: Path) -> dict[str
             errors.append(f"Missing required report section heading matching: {sec_name}")
 
     # 2. Model-to-Report numerical & rating consistency
+    csym = _currency_symbol(str(val.get("currency", "USD")))
     ticker = str(val["ticker"]).upper()
     if ticker not in md_text:
         errors.append(f"Ticker '{ticker}' does not appear in report.")
@@ -182,12 +196,12 @@ def audit_report(report_md_path: Path, valuation_summary_path: Path) -> dict[str
     tp = float(val["blended_target_price"])
     if not _number_appears(md_text, tp):
         errors.append(
-            f"Blended Target Price (${tp:.2f}) from valuation_summary.json does not appear in report."
+            f"Blended Target Price ({csym}{tp:.2f}) from valuation_summary.json does not appear in report."
         )
 
     cp = float(val["current_price"])
     if not _number_appears(md_text, cp):
-        errors.append(f"Current Share Price (${cp:.2f}) does not appear in report.")
+        errors.append(f"Current Share Price ({csym}{cp:.2f}) does not appear in report.")
 
     upside = float(val["implied_upside_pct"])
     if not _number_appears(md_text, upside, pct=True) and not _number_appears(md_text, abs(upside)):
@@ -202,9 +216,9 @@ def audit_report(report_md_path: Path, valuation_summary_path: Path) -> dict[str
     bull_p = float(val["scenarios"]["bull"]["share_price_perpetuity"])
     bear_p = float(val["scenarios"]["bear"]["share_price_perpetuity"])
     if not _number_appears(md_text, bull_p):
-        warnings.append(f"Bull case intrinsic price (${bull_p:.2f}) not explicitly cited in report.")
+        warnings.append(f"Bull case intrinsic price ({csym}{bull_p:.2f}) not explicitly cited in report.")
     if not _number_appears(md_text, bear_p):
-        warnings.append(f"Bear case intrinsic price (${bear_p:.2f}) not explicitly cited in report.")
+        warnings.append(f"Bear case intrinsic price ({csym}{bear_p:.2f}) not explicitly cited in report.")
 
     # 2B. Bidirectional Thesis-to-Model check in Section 7 (Detailed Variant Thesis)
     pillars = val.get("thesis_pillars", [])
@@ -383,8 +397,9 @@ def _is_numeric_col(col_texts: list[str]) -> bool:
         return False
     num_hits = 0
     for val in non_empty:
-        cleaned = re.sub(r"[$€£,+%xX()*~\s/]", "", val)
-        cleaned = cleaned.replace("bps", "").replace("M", "").replace("B", "").replace("T", "")
+        cleaned = re.sub(r"(?i)\b(hkd|usd|rmb|cny|eur|gbp|jpy|bps)\b", "", val)
+        cleaned = re.sub(r"(?i)(hk\$|us\$|[$€£¥,+%xX()*~\s/])", "", cleaned)
+        cleaned = cleaned.replace("M", "").replace("B", "").replace("T", "")
         if re.fullmatch(r"-?\d+(\.\d+)?(-?\d+(\.\d+)?)?", cleaned):
             num_hits += 1
     return (num_hits / len(non_empty)) >= 0.6
@@ -504,6 +519,7 @@ def export_pdf(report_md_path: Path, out_pdf_path: Path, valuation_summary_path:
     story: list[Any] = []
 
     # Institutional Page-1 Masthead Banner
+    csym = _currency_symbol(str(val.get("currency", "USD")))
     ticker = str(val.get("ticker", "")).upper()
     comp_name = _clean_text(str(val.get("company_name", ticker)), use_unicode_ttf)
     tp = float(val.get("blended_target_price", 0.0))
@@ -519,8 +535,8 @@ def export_pdf(report_md_path: Path, out_pdf_path: Path, valuation_summary_path:
     )
     mast_right = Paragraph(
         f'<font size="12" color="#FFFFFF"><b>RATING: {html.escape(rating_str)}</b></font><br/>'
-        f'<font size="9.5" color="#FFFFFF"><b>Target: ${tp:,.2f}</b> ({upside:+.2f}%)</font><br/>'
-        f'<font size="8.5" color="#F7FAFC">Current Price: ${cp:,.2f}</font>',
+        f'<font size="9.5" color="#FFFFFF"><b>Target: {html.escape(csym)}{tp:,.2f}</b> ({upside:+.2f}%)</font><br/>'
+        f'<font size="8.5" color="#F7FAFC">Current Price: {html.escape(csym)}{cp:,.2f}</font>',
         ParagraphStyle("MastR", fontName=body_font, leading=13.5, alignment=TA_RIGHT),
     )
     mast_tbl = Table([[mast_left, mast_right]], colWidths=[avail_w * 0.67, avail_w * 0.33])
@@ -767,7 +783,7 @@ def export_pdf(report_md_path: Path, out_pdf_path: Path, valuation_summary_path:
         canvas.drawString(
             doc_obj.leftMargin,
             y_bot,
-            f"{comp_name} ({ticker})  |  Primary-Source SEC EDGAR & Live-Formula Valuation Coverage",
+            f"{comp_name} ({ticker})  |  Primary-Source Filing & Live-Formula Valuation Coverage",
         )
         canvas.drawRightString(letter[0] - doc_obj.rightMargin, y_bot, f"Page {page_num}")
 
@@ -784,7 +800,7 @@ def export_pdf(report_md_path: Path, out_pdf_path: Path, valuation_summary_path:
             canvas.drawRightString(
                 letter[0] - doc_obj.rightMargin,
                 y_top,
-                f"Rating: {rating_str}  |  Target: ${tp:,.2f} ({upside:+.2f}%)",
+                f"Rating: {rating_str}  |  Target: {csym}{tp:,.2f} ({upside:+.2f}%)",
             )
         canvas.restoreState()
 

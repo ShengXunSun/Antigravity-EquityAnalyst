@@ -1,7 +1,7 @@
 [project]
 name = "antigravity-equity-analyst"
-version = "1.0.0"
-description = "Standalone Google Antigravity skill suite and PEP 723 Python toolkit for secondary-market equity research (v1.0)"
+version = "1.1.0"
+description = "Standalone Google Antigravity skill suite and PEP 723 Python toolkit for secondary-market equity research (v1.1)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

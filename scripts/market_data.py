@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+import threading
+
 # Store yfinance SQLite cache inside workspace memory/.cache to avoid temp lock collisions
 _YF_CACHE = Path("memory/.cache/yfinance")
 _YF_CACHE.mkdir(parents=True, exist_ok=True)
@@ -30,6 +32,51 @@ try:
     yf.set_tz_cache_location(str(_YF_CACHE))
 except Exception:
     pass
+
+_FX_LOCK = threading.Lock()
+_FX_TO_USD_CACHE: dict[str, float] = {"USD": 1.0}
+_FX_FALLBACK_TO_USD: dict[str, float] = {
+    "USD": 1.0,
+    "HKD": 1.0 / 7.82,
+    "CNY": 1.0 / 7.15,
+    "RMB": 1.0 / 7.15,
+    "EUR": 1.07,
+    "GBP": 1.28,
+    "JPY": 1.0 / 154.0,
+    "TWD": 1.0 / 32.4,
+    "CAD": 1.0 / 1.39,
+    "AUD": 0.65,
+    "SGD": 1.0 / 1.34,
+    "CHF": 1.13,
+}
+
+
+def _fx_to_usd(currency: str | None) -> float:
+    ccy = (currency or "USD").strip().upper()
+    if not ccy or ccy == "USD":
+        return 1.0
+    with _FX_LOCK:
+        if ccy in _FX_TO_USD_CACHE:
+            return _FX_TO_USD_CACHE[ccy]
+    rate: float | None = None
+    try:
+        pair = "CNY" if ccy == "RMB" else ccy
+        info = yf.Ticker(f"{pair}USD=X").info or {}
+        r = _safe_float(info.get("regularMarketPrice") or info.get("previousClose"))
+        if r and r > 0:
+            rate = r
+        else:
+            inv_info = yf.Ticker(f"USD{pair}=X").info or {}
+            inv_r = _safe_float(inv_info.get("regularMarketPrice") or inv_info.get("previousClose"))
+            if inv_r and inv_r > 0:
+                rate = 1.0 / inv_r
+    except Exception:
+        rate = None
+    if not rate or rate <= 0:
+        rate = _FX_FALLBACK_TO_USD.get(ccy, 1.0)
+    with _FX_LOCK:
+        _FX_TO_USD_CACHE[ccy] = rate
+    return rate
 
 
 def _safe_float(val: Any) -> float | None:
@@ -56,9 +103,16 @@ def fetch_snapshot(ticker: str) -> dict[str, Any]:
                 raise
             time.sleep(0.25 * (attempt + 1))
 
+    quote_ccy = str(info.get("currency") or "USD").upper()
+    fin_ccy = str(info.get("financialCurrency") or quote_ccy).upper()
+    q_to_usd = _fx_to_usd(quote_ccy)
+    f_to_usd = _fx_to_usd(fin_ccy)
+    f_to_q = (f_to_usd / q_to_usd) if q_to_usd > 0 else 1.0
+
     price = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
     mcap = _safe_float(info.get("marketCap"))
-    ev = _safe_float(info.get("enterpriseValue"))
+    ev_raw = _safe_float(info.get("enterpriseValue"))
+    rev = _safe_float(info.get("totalRevenue"))
     fcf = _safe_float(info.get("freeCashflow"))
     ocf = _safe_float(info.get("operatingCashflow"))
     ebitda = _safe_float(info.get("ebitda"))
@@ -66,8 +120,22 @@ def fetch_snapshot(ticker: str) -> dict[str, Any]:
     total_cash = _safe_float(info.get("totalCash")) or 0.0
     net_debt = total_debt - total_cash
     avg_vol = _safe_float(info.get("averageVolume"))
-    adv_usd_m = ((price * avg_vol) / 1e6) if (price and avg_vol) else None
-    fcf_yield = (fcf / mcap) if (fcf is not None and mcap and mcap > 0) else None
+
+    mcap_usd_m = ((mcap * q_to_usd) / 1e6) if mcap else None
+    adv_usd_m = ((price * avg_vol * q_to_usd) / 1e6) if (price and avg_vol) else None
+
+    # Normalize EV, FCF yield, EV/EBITDA, and EV/Revenue when quote currency != financial statement currency (e.g. HKEX stocks reporting in CNY or USD)
+    if fin_ccy != quote_ccy and mcap is not None:
+        ev = mcap + (net_debt * f_to_q)
+        fcf_yield = ((fcf * f_to_q) / mcap) if (fcf is not None and mcap > 0) else None
+        ev_to_ebitda = (ev / (ebitda * f_to_q)) if (ebitda and ebitda > 0 and ev > 0) else None
+        ev_to_rev = (ev / (rev * f_to_q)) if (rev and rev > 0 and ev > 0) else None
+    else:
+        ev = ev_raw
+        fcf_yield = (fcf / mcap) if (fcf is not None and mcap and mcap > 0) else None
+        ev_to_ebitda = _safe_float(info.get("enterpriseToEbitda"))
+        ev_to_rev = _safe_float(info.get("enterpriseToRevenue"))
+
     nd_ebitda = (net_debt / ebitda) if (ebitda and ebitda > 0) else None
 
     return {
@@ -76,11 +144,15 @@ def fetch_snapshot(ticker: str) -> dict[str, Any]:
         "sector": info.get("sector"),
         "industry": info.get("industry"),
         "quote_type": info.get("quoteType"),
-        "currency": info.get("currency", "USD"),
+        "currency": quote_ccy,
+        "financial_currency": fin_ccy,
+        "fx_quote_to_usd": round(q_to_usd, 6),
+        "fx_fin_to_quote": round(f_to_q, 6),
         "current_price": price,
         "market_cap": mcap,
-        "market_cap_usd_m": round(mcap / 1e6, 2) if mcap else None,
-        "enterprise_value": ev,
+        "market_cap_usd_m": round(mcap_usd_m, 2) if mcap_usd_m else None,
+        "enterprise_value": round(ev, 2) if ev is not None else None,
+        "enterprise_value_usd_m": round((ev * q_to_usd) / 1e6, 2) if ev is not None else None,
         "avg_daily_dollar_vol_m": round(adv_usd_m, 2) if adv_usd_m else None,
         "beta": _safe_float(info.get("beta")),
         "52w_high": _safe_float(info.get("fiftyTwoWeekHigh")),
@@ -89,14 +161,14 @@ def fetch_snapshot(ticker: str) -> dict[str, Any]:
             "trailing_pe": _safe_float(info.get("trailingPE")),
             "forward_pe": _safe_float(info.get("forwardPE")),
             "peg_ratio": _safe_float(info.get("pegRatio") or info.get("trailingPegRatio")),
-            "ev_to_ebitda": _safe_float(info.get("enterpriseToEbitda")),
-            "ev_to_revenue": _safe_float(info.get("enterpriseToRevenue")),
+            "ev_to_ebitda": round(ev_to_ebitda, 4) if ev_to_ebitda is not None else None,
+            "ev_to_revenue": round(ev_to_rev, 4) if ev_to_rev is not None else None,
             "price_to_book": _safe_float(info.get("priceToBook")),
             "dividend_yield": _safe_float(info.get("dividendYield")),
             "fcf_yield": round(fcf_yield, 4) if fcf_yield is not None else None,
         },
         "fundamentals_ttm": {
-            "total_revenue": _safe_float(info.get("totalRevenue")),
+            "total_revenue": rev,
             "revenue_growth_yoy": _safe_float(info.get("revenueGrowth")),
             "earnings_growth_yoy": _safe_float(info.get("earningsGrowth")),
             "gross_margins": _safe_float(info.get("grossMargins")),
@@ -129,6 +201,33 @@ def fetch_snapshot(ticker: str) -> dict[str, Any]:
     }
 
 
+def fetch_interest_coverage(ticker: str) -> float | None:
+    """Compute latest annual EBIT / abs(Interest Expense) from yfinance income_stmt."""
+    try:
+        inc = yf.Ticker(ticker.upper()).income_stmt
+        if inc is None or inc.empty:
+            return None
+        ebit = None
+        for key in ("EBIT", "Operating Income"):
+            if key in inc.index:
+                s = pd.to_numeric(inc.loc[key], errors="coerce").dropna()
+                if not s.empty:
+                    ebit = float(s.iloc[0])
+                    break
+        int_exp = None
+        for key in ("Interest Expense", "Interest Expense Non Operating"):
+            if key in inc.index:
+                s = pd.to_numeric(inc.loc[key], errors="coerce").dropna()
+                if not s.empty:
+                    int_exp = abs(float(s.iloc[0]))
+                    break
+        if ebit is not None and int_exp is not None and int_exp > 0:
+            return round(ebit / int_exp, 2)
+    except Exception:
+        return None
+    return None
+
+
 def solve_reverse_dcf(
     ticker: str,
     wacc: float = 0.095,
@@ -140,8 +239,15 @@ def solve_reverse_dcf(
     snap = fetch_snapshot(ticker)
     ev = snap["enterprise_value"]
     ttm = snap["fundamentals_ttm"]
-    base_fcf = base_fcf_override if base_fcf_override is not None else ttm.get("free_cash_flow")
-    rev = ttm.get("total_revenue")
+    f_to_q = float(snap.get("fx_fin_to_quote") or 1.0)
+    raw_fcf = ttm.get("free_cash_flow")
+    base_fcf = (
+        base_fcf_override
+        if base_fcf_override is not None
+        else (raw_fcf * f_to_q if raw_fcf is not None else None)
+    )
+    rev_raw = ttm.get("total_revenue")
+    rev = (rev_raw * f_to_q) if rev_raw is not None else None
 
     if not ev or ev <= 0:
         raise ValueError(f"Valid positive Enterprise Value unavailable for {ticker} (got {ev}).")
@@ -204,9 +310,7 @@ def build_peer_comps(tickers: list[str]) -> dict[str, Any]:
                 "ticker": s["ticker"],
                 "name": s["short_name"],
                 "market_cap_usd_m": s["market_cap_usd_m"],
-                "enterprise_value_usd_m": round(s["enterprise_value"] / 1e6, 2)
-                if s["enterprise_value"]
-                else None,
+                "enterprise_value_usd_m": s["enterprise_value_usd_m"],
                 "revenue_growth_yoy": f["revenue_growth_yoy"],
                 "ebitda_margin": f["ebitda_margins"],
                 "operating_margin": f["operating_margins"],
@@ -216,6 +320,18 @@ def build_peer_comps(tickers: list[str]) -> dict[str, Any]:
                 "forward_pe": m["forward_pe"],
                 "peg_ratio": m["peg_ratio"],
                 "ev_to_ebitda": m["ev_to_ebitda"],
+                "ev_to_ebitda_basis": "trailing_ttm",
+                "ev_to_ebitda_ntm_proxy": (
+                    round(m["ev_to_ebitda"] * (m["forward_pe"] / m["trailing_pe"]), 4)
+                    if (
+                        m.get("ev_to_ebitda") is not None
+                        and m.get("forward_pe")
+                        and m.get("trailing_pe")
+                        and m["forward_pe"] > 0
+                        and m["trailing_pe"] > 0
+                    )
+                    else None
+                ),
                 "ev_to_revenue": m["ev_to_revenue"],
                 "price_to_book": m["price_to_book"],
                 "fcf_yield": m["fcf_yield"],
@@ -233,6 +349,7 @@ def build_peer_comps(tickers: list[str]) -> dict[str, Any]:
         "forward_pe",
         "peg_ratio",
         "ev_to_ebitda",
+        "ev_to_ebitda_ntm_proxy",
         "ev_to_revenue",
         "price_to_book",
         "fcf_yield",
@@ -251,18 +368,28 @@ def build_peer_comps(tickers: list[str]) -> dict[str, Any]:
 
     return {
         "tickers": [r["ticker"] for r in rows],
+        "multiples_basis": {
+            "ev_to_ebitda": "trailing_ttm (match against TTM/FY0 EBITDA or forward-adjust)",
+            "ev_to_ebitda_ntm_proxy": "trailing ev_to_ebitda scaled by forward_pe / trailing_pe",
+            "forward_pe": "forward_ntm (match against Forward Year-1 Earnings)",
+            "trailing_pe": "trailing_ttm",
+        },
         "peers": rows,
         "summary_statistics": summary,
     }
 
 
 def run_benchmark_sanity_check(
-    tickers: list[str], benchmark: str = "SPY", years: int = 5
+    tickers: list[str],
+    benchmark: str = "SPY",
+    years: int = 5,
+    align_with: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compare equal-weight basket of current finalists vs benchmark with explicit survivorship-bias warning."""
     clean_tickers = [t.upper() for t in tickers]
+    align_tickers = [t.upper() for t in (align_with or [])]
     bm = benchmark.upper()
-    all_syms = list(dict.fromkeys(clean_tickers + [bm]))
+    all_syms = list(dict.fromkeys(clean_tickers + align_tickers + [bm]))
 
     hist = yf.download(
         all_syms,
@@ -283,10 +410,14 @@ def run_benchmark_sanity_check(
     avail_basket = [
         t for t in clean_tickers if t in daily_ret.columns and int(daily_ret[t].notna().sum()) > 20
     ]
+    avail_align = [
+        t for t in align_tickers if t in daily_ret.columns and int(daily_ret[t].notna().sum()) > 20
+    ]
     if not avail_basket or bm not in daily_ret.columns or int(daily_ret[bm].notna().sum()) <= 20:
         raise ValueError(f"Missing valid price series for basket {avail_basket} or benchmark {bm}.")
 
-    aligned = daily_ret[avail_basket + [bm]].dropna(how="any")
+    align_cols = list(dict.fromkeys(avail_basket + avail_align + [bm]))
+    aligned = daily_ret[align_cols].dropna(how="any")
     if len(aligned) < 20:
         raise ValueError(f"Insufficient overlapping trading days ({len(aligned)}) for sanity check.")
     basket_ret = aligned[avail_basket].mean(axis=1)
@@ -322,6 +453,9 @@ def run_benchmark_sanity_check(
         ),
         "period_years": years,
         "trading_days_evaluated": int(len(aligned)),
+        "window_start": str(aligned.index[0].date()),
+        "window_end": str(aligned.index[-1].date()),
+        "calendar_aligned_with": avail_align,
         "basket_tickers": avail_basket,
         "benchmark_ticker": bm,
         "realized_basket_beta_vs_benchmark": realized_beta,
@@ -354,6 +488,7 @@ def main() -> int:
     p_sanity.add_argument("tickers", nargs="+")
     p_sanity.add_argument("--benchmark", default="SPY")
     p_sanity.add_argument("--years", type=int, default=5)
+    p_sanity.add_argument("--align-with", nargs="*", help="Extra tickers to intersect trading calendar with (for like-for-like US/HK basket comparisons)")
     p_sanity.add_argument("--out")
 
     args = parser.parse_args()
@@ -372,7 +507,7 @@ def main() -> int:
             res = build_peer_comps(args.tickers)
         elif args.cmd == "sanity-check":
             res = run_benchmark_sanity_check(
-                args.tickers, benchmark=args.benchmark, years=args.years
+                args.tickers, benchmark=args.benchmark, years=args.years, align_with=args.align_with
             )
         else:
             raise ValueError(f"Unknown command: {args.cmd}")

@@ -41,3 +41,8 @@ Read [references/report-template-and-prose-rules.md](references/report-template-
 2. `audit_report.py` refuses to emit the PDF if any numerical check, `T1..Tn` model-impact check, Section 8 basis table check, or strict-slop check fails. If it exits non-zero, edit `memory/<TICKER>/report_draft.md` and re-run until `status == "PASS"` with `0` errors and `0` warnings.
 3. Log final deliverable verification via `decision_log.py`.
 4. **Completion criterion:** `audit_report.py --strict-slop` exits `0`, and `Output/reports/<TICKER>_report.pdf` is saved alongside `Output/models/<TICKER>_valuation.xlsx`.
+
+### Step 4: 1-Iteration Master-Agent Report Rewrite from Verification Feedback (Before Final Delivery)
+1. When the Cross-Model Verification Agent (`claude-sonnet-5-5-high` via `swarm`) pushes feedback (`memory/trail_audit.md` + board post to `@coordinator`) on `report_draft.md`, `valuation_summary.json`, accounting notes, thesis evidence, prose clarity, or risk/catalyst coverage:
+   - Do **not** bounce report rewrites back to researcher subagents. The **master (coordinator) agent directly rewrites** `memory/<TICKER>/report_draft.md` in **`1` single rewrite iteration** (synced with any updated `analyst_dossier.md` and `valuation_summary.json`), and re-runs `audit_report.py --strict-slop --export-pdf Output/reports/<TICKER>_report.pdf --out-audit-json memory/<TICKER>/report_audit.json` until `status == "PASS"` (`0` errors, `0` warnings).
+2. **Completion criterion:** The master-rewritten `.pdf` and `report_audit.json` match the revised `.xlsx` model within **`1` rewrite iteration** and earn final confirmatory `VERDICT: PASS` (never starting a 2nd rewrite cycle; residual non-blocking notes go into `## Attention`) before delivery to the user.

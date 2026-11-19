@@ -69,6 +69,7 @@ SAMPLE_SPEC: dict[str, Any] = {
         "sector": "Information Technology",
         "industry": "Systems Software",
         "model_type": "standard_dcf",
+        "ebit_includes_sbc": True,
         "valuation_date": "2026-11-13",
         "currency": "USD",
         "units_label": "$ in Millions (except per-share data)",
@@ -324,6 +325,25 @@ def _style_section_bar(ws: Any, row: int, text: str, max_col: int = 10) -> None:
     ws.row_dimensions[row].height = 21
 
 
+def _currency_formats(currency: str) -> tuple[str, str, str, str, str]:
+    code = (currency or "USD").strip().upper()
+    sym_map = {
+        "USD": ("$", "$"),
+        "HKD": ("HK$", '"HK$"'),
+        "CNY": ("RMB ", '"RMB "'),
+        "RMB": ("RMB ", '"RMB "'),
+        "EUR": ("€", "€"),
+        "GBP": ("£", "£"),
+        "JPY": ("¥", "¥"),
+    }
+    sym, xl_sym = sym_map.get(code, (f"{code} ", f'"{code} "'))
+    unit_m = f"{sym.strip()}M"
+    fmt_curr = f'{xl_sym}#,##0.00;({xl_sym}#,##0.00);"-"'
+    fmt_int_m = f'{xl_sym}#,##0;({xl_sym}#,##0);"-"'
+    fmt_dec_m = f'{xl_sym}#,##0.0;({xl_sym}#,##0.0);"-"'
+    return sym, unit_m, fmt_curr, fmt_int_m, fmt_dec_m
+
+
 def _format_basis_tag(basis_entry: dict[str, Any]) -> str:
     if basis_entry.get("basis_type") == "thesis":
         tids = ", ".join(basis_entry.get("thesis_ids", []))
@@ -450,6 +470,7 @@ def _compute_python_shadow(spec: dict[str, Any]) -> dict[str, Any]:
     _validate_spec(spec)
     meta = spec["meta"]
     model_type = meta.get("model_type", "standard_dcf")
+    ebit_includes_sbc = bool(meta.get("ebit_includes_sbc", False))
     wi = spec["wacc_inputs"]
     fc = spec["forecast"]
     years = fc["years"]
@@ -510,7 +531,7 @@ def _compute_python_shadow(spec: dict[str, Any]) -> dict[str, Any]:
             ebits.append(ebit)
             ebitdas.append(ebitda)
             cfs.append(cf)
-            fcfs_ex_sbc.append(cf - sbc)
+            fcfs_ex_sbc.append(cf if ebit_includes_sbc else (cf - sbc))
 
         pv_cfs = sum(cfs[i] / ((1.0 + disc_rate) ** (i + 1)) for i in range(n_yr))
         tv_perp = (cfs[-1] * (1.0 + tg)) / (disc_rate - tg)
@@ -588,7 +609,9 @@ def _compute_python_shadow(spec: dict[str, Any]) -> dict[str, Any]:
     return {
         "ticker": meta["ticker"],
         "company_name": meta["company_name"],
+        "currency": str(meta.get("currency", "USD")).upper(),
         "model_type": model_type,
+        "ebit_includes_sbc": ebit_includes_sbc,
         "valuation_date": meta["valuation_date"],
         "current_price": cur_p,
         "discount_rate_wacc_or_ke": round(disc_rate, 4),
@@ -617,6 +640,9 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     _validate_spec(spec)
     meta = spec["meta"]
     model_type = meta.get("model_type", "standard_dcf")
+    ebit_includes_sbc = bool(meta.get("ebit_includes_sbc", False))
+    curr_sym, unit_m, fmt_curr, fmt_int_m, _fmt_dec_m = _currency_formats(str(meta.get("currency", "USD")))
+    cs = curr_sym.strip()
     wi = spec["wacc_inputs"]
     hist = spec["historicals"]
     fc = spec["forecast"]
@@ -841,19 +867,27 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         else ("Adjusted FFO (AFFO)" if model_type == "reit_affo" else "Unlevered Free Cash Flow (UFCF)")
     )
     row_specs_proj = [
-        ("rev", "Revenue", "$M", FMT_INT_M, True),
+        ("rev", "Revenue", unit_m, fmt_int_m, True),
         ("rev_g", "Revenue Growth (%)", "%", FMT_PCT, False),
-        ("ebit", "Operating Income (EBIT)", "$M", FMT_INT_M, False),
+        ("ebit", "Operating Income (EBIT)", unit_m, fmt_int_m, False),
         ("ebit_m", "Operating Margin (%)", "%", FMT_PCT, False),
         ("tax_rate", "Effective Tax Rate (%)", "%", FMT_PCT, False),
-        ("nopat", "NOPAT / Operating After-Tax Profit", "$M", FMT_INT_M, True),
-        ("da", "Depreciation & Amortization (+)", "$M", FMT_INT_M, False),
-        ("ebitda", "EBITDA", "$M", FMT_INT_M, True),
-        ("capex", "Capital Expenditures (-)", "$M", FMT_INT_M, False),
-        ("dnwc", "Change in Net Working Capital (-)", "$M", FMT_INT_M, False),
-        ("ufcf", cf_label, "$M", FMT_INT_M, True),
-        ("sbc", "Memo: Stock-Based Compensation", "$M", FMT_INT_M, False),
-        ("fcf_ex_sbc", "Memo: Cash Flow ex-SBC", "$M", FMT_INT_M, True),
+        ("nopat", "NOPAT / Operating After-Tax Profit", unit_m, fmt_int_m, True),
+        ("da", "Depreciation & Amortization (+)", unit_m, fmt_int_m, False),
+        ("ebitda", "EBITDA", unit_m, fmt_int_m, True),
+        ("capex", "Capital Expenditures (-)", unit_m, fmt_int_m, False),
+        ("dnwc", "Change in Net Working Capital (-)", unit_m, fmt_int_m, False),
+        ("ufcf", cf_label, unit_m, fmt_int_m, True),
+        ("sbc", "Memo: Stock-Based Compensation", unit_m, fmt_int_m, False),
+        (
+            "fcf_ex_sbc",
+            "Memo: Cash Flow ex-SBC (SBC already expensed in EBIT)"
+            if meta.get("ebit_includes_sbc", False)
+            else "Memo: Cash Flow ex-SBC",
+            unit_m,
+            fmt_int_m,
+            True,
+        ),
     ]
 
     for key, lbl, unit, _, is_bold in row_specs_proj:
@@ -881,7 +915,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             c = ws_proj.cell(proj_rows[key], col, float(h.get(h_field, 0.0)))
             c.font = FONT_INPUT
             c.fill = FILL_INPUT
-            c.number_format = FMT_INT_M
+            c.number_format = fmt_int_m
 
         c_rg = ws_proj.cell(
             proj_rows["rev_g"],
@@ -902,11 +936,11 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
 
         c_np = ws_proj.cell(proj_rows["nopat"], col, f"={cl}{proj_rows['ebit']}*(1-{cl}{proj_rows['tax_rate']})")
         c_np.font = FONT_FORMULA_BOLD
-        c_np.number_format = FMT_INT_M
+        c_np.number_format = fmt_int_m
 
         c_eb = ws_proj.cell(proj_rows["ebitda"], col, f"={cl}{proj_rows['ebit']}+{cl}{proj_rows['da']}")
         c_eb.font = FONT_FORMULA_BOLD
-        c_eb.number_format = FMT_INT_M
+        c_eb.number_format = fmt_int_m
 
         ufcf_f = (
             f"={cl}{proj_rows['nopat']}-{cl}{proj_rows['capex']}-{cl}{proj_rows['dnwc']}"
@@ -917,11 +951,16 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         c_uf.font = FONT_FORMULA_BOLD
         c_uf.fill = FILL_TOTAL
         c_uf.border = BORDER_TOTAL
-        c_uf.number_format = FMT_INT_M
+        c_uf.number_format = fmt_int_m
 
-        c_xs = ws_proj.cell(proj_rows["fcf_ex_sbc"], col, f"={cl}{proj_rows['ufcf']}-{cl}{proj_rows['sbc']}")
+        ex_sbc_f = (
+            f"={cl}{proj_rows['ufcf']}"
+            if meta.get("ebit_includes_sbc", False)
+            else f"={cl}{proj_rows['ufcf']}-{cl}{proj_rows['sbc']}"
+        )
+        c_xs = ws_proj.cell(proj_rows["fcf_ex_sbc"], col, ex_sbc_f)
         c_xs.font = FONT_FORMULA_BOLD
-        c_xs.number_format = FMT_INT_M
+        c_xs.number_format = fmt_int_m
 
     # Populate Forecast columns linked to 'Assumptions & Scenarios'
     for j in range(n_fc):
@@ -941,7 +980,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         c_rv = ws_proj.cell(proj_rows["rev"], col, f"={prev_cl}{proj_rows['rev']}*(1+{cl}{proj_rows['rev_g']})")
         c_rv.font = FONT_FORMULA_BOLD
         c_rv.fill = FILL_TOTAL
-        c_rv.number_format = FMT_INT_M
+        c_rv.number_format = fmt_int_m
 
         c_em = ws_proj.cell(
             proj_rows["ebit_m"],
@@ -953,7 +992,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
 
         c_ebit = ws_proj.cell(proj_rows["ebit"], col, f"={cl}{proj_rows['rev']}*{cl}{proj_rows['ebit_m']}")
         c_ebit.font = FONT_FORMULA
-        c_ebit.number_format = FMT_INT_M
+        c_ebit.number_format = fmt_int_m
 
         c_tx = ws_proj.cell(
             proj_rows["tax_rate"],
@@ -966,7 +1005,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         c_np = ws_proj.cell(proj_rows["nopat"], col, f"={cl}{proj_rows['ebit']}*(1-{cl}{proj_rows['tax_rate']})")
         c_np.font = FONT_FORMULA_BOLD
         c_np.fill = FILL_TOTAL
-        c_np.number_format = FMT_INT_M
+        c_np.number_format = fmt_int_m
 
         c_da = ws_proj.cell(
             proj_rows["da"],
@@ -974,12 +1013,12 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             f"={cl}{proj_rows['rev']}*'Assumptions & Scenarios'!{assump_cl}{scenario_row_map['active']['da_pct_rev']}",
         )
         c_da.font = FONT_LINK
-        c_da.number_format = FMT_INT_M
+        c_da.number_format = fmt_int_m
 
         c_ebitda = ws_proj.cell(proj_rows["ebitda"], col, f"={cl}{proj_rows['ebit']}+{cl}{proj_rows['da']}")
         c_ebitda.font = FONT_FORMULA_BOLD
         c_ebitda.fill = FILL_TOTAL
-        c_ebitda.number_format = FMT_INT_M
+        c_ebitda.number_format = fmt_int_m
 
         c_cx = ws_proj.cell(
             proj_rows["capex"],
@@ -987,7 +1026,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             f"={cl}{proj_rows['rev']}*'Assumptions & Scenarios'!{assump_cl}{scenario_row_map['active']['capex_pct_rev']}",
         )
         c_cx.font = FONT_LINK
-        c_cx.number_format = FMT_INT_M
+        c_cx.number_format = fmt_int_m
 
         c_nw = ws_proj.cell(
             proj_rows["dnwc"],
@@ -995,7 +1034,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             f"=({cl}{proj_rows['rev']}-{prev_cl}{proj_rows['rev']})*'Assumptions & Scenarios'!{assump_cl}{scenario_row_map['active']['nwc_pct_delta_rev']}",
         )
         c_nw.font = FONT_LINK
-        c_nw.number_format = FMT_INT_M
+        c_nw.number_format = fmt_int_m
 
         ufcf_f = (
             f"={cl}{proj_rows['nopat']}-{cl}{proj_rows['capex']}-{cl}{proj_rows['dnwc']}"
@@ -1006,7 +1045,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         c_uf.font = FONT_FORMULA_BOLD
         c_uf.fill = FILL_TOTAL
         c_uf.border = BORDER_TOTAL
-        c_uf.number_format = FMT_INT_M
+        c_uf.number_format = fmt_int_m
 
         c_sb = ws_proj.cell(
             proj_rows["sbc"],
@@ -1014,18 +1053,23 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             f"={cl}{proj_rows['rev']}*'Assumptions & Scenarios'!{assump_cl}{scenario_row_map['active']['sbc_pct_rev']}",
         )
         c_sb.font = FONT_LINK
-        c_sb.number_format = FMT_INT_M
+        c_sb.number_format = fmt_int_m
 
-        c_xs = ws_proj.cell(proj_rows["fcf_ex_sbc"], col, f"={cl}{proj_rows['ufcf']}-{cl}{proj_rows['sbc']}")
+        ex_sbc_f = (
+            f"={cl}{proj_rows['ufcf']}"
+            if meta.get("ebit_includes_sbc", False)
+            else f"={cl}{proj_rows['ufcf']}-{cl}{proj_rows['sbc']}"
+        )
+        c_xs = ws_proj.cell(proj_rows["fcf_ex_sbc"], col, ex_sbc_f)
         c_xs.font = FONT_FORMULA_BOLD
-        c_xs.number_format = FMT_INT_M
+        c_xs.number_format = fmt_int_m
 
     # Dedicated Static Scenario Cash Flow Strips on Historical & Forecast (rows 21..38) so Base/Bull/Bear prices evaluate live simultaneously!
     last_hist_rev_cell = f"{get_column_letter(2 + n_hist)}{proj_rows['rev']}"
     sc_strip_rows: dict[str, dict[str, int]] = {}
     r_cursor = 21
     for sc_key in ("base", "bull", "bear"):
-        _style_section_bar(ws_proj, r_cursor, f"Simultaneous Scenario Strip: {sc_key.upper()} Case ($M)", tot_cols_proj)
+        _style_section_bar(ws_proj, r_cursor, f"Simultaneous Scenario Strip: {sc_key.upper()} Case ({unit_m})", tot_cols_proj)
         r_rev_s = r_cursor + 1
         r_ebitda_s = r_cursor + 2
         r_cf_s = r_cursor + 3
@@ -1045,7 +1089,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
                 r_rev_s, col, f"={prev_rev_ref}*(1+'Assumptions & Scenarios'!{acl}{rmap['revenue_growth']})"
             )
             cr.font = FONT_LINK
-            cr.number_format = FMT_INT_M
+            cr.number_format = fmt_int_m
 
             ce = ws_proj.cell(
                 r_ebitda_s,
@@ -1053,7 +1097,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
                 f"={cl}{r_rev_s}*('Assumptions & Scenarios'!{acl}{rmap['ebit_margin']}+'Assumptions & Scenarios'!{acl}{rmap['da_pct_rev']})",
             )
             ce.font = FONT_LINK
-            ce.number_format = FMT_INT_M
+            ce.number_format = fmt_int_m
 
             nopat_expr = f"({cl}{r_rev_s}*'Assumptions & Scenarios'!{acl}{rmap['ebit_margin']}*(1-'Assumptions & Scenarios'!{acl}{rmap['tax_rate']}))"
             da_expr = f"({cl}{r_rev_s}*'Assumptions & Scenarios'!{acl}{rmap['da_pct_rev']})"
@@ -1066,7 +1110,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             )
             ccf = ws_proj.cell(r_cf_s, col, cf_expr)
             ccf.font = FONT_FORMULA_BOLD
-            ccf.number_format = FMT_INT_M
+            ccf.number_format = fmt_int_m
 
         r_cursor += 5
 
@@ -1111,16 +1155,16 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         c.border = BORDER_DATA
 
     bridge_right = [
-        (5, "Current Share Price ($)", float(meta["current_price"]), FMT_CURR, True),
+        (5, f"Current Share Price ({cs})", float(meta["current_price"]), fmt_curr, True),
         (6, "Diluted Shares Outstanding (M)", float(meta["diluted_shares_m"]), FMT_SHARES, True),
-        (7, "Market Capitalization ($M)", "=E5*E6", FMT_INT_M, False),
-        (8, "Total Debt ($M)", float(meta["total_debt_m"]), FMT_INT_M, True),
-        (9, "Total Market Capitalization ($M)", "=E7+E8", FMT_INT_M, False),
-        (10, "Cash & Marketable Securities ($M)", float(meta["cash_and_investments_m"]), FMT_INT_M, True),
-        (11, "Preferred Stock ($M)", float(meta.get("preferred_stock_m", 0.0)), FMT_INT_M, True),
-        (12, "Minority Interest ($M)", float(meta.get("minority_interest_m", 0.0)), FMT_INT_M, True),
-        (13, "Net Debt ($M)", "=E8-E10", FMT_INT_M, False),
-        (14, "Current Enterprise Value ($M)", "=E7+E8+E11+E12-E10", FMT_INT_M, False),
+        (7, f"Market Capitalization ({unit_m})", "=E5*E6", fmt_int_m, False),
+        (8, f"Total Debt ({unit_m})", float(meta["total_debt_m"]), fmt_int_m, True),
+        (9, f"Total Market Capitalization ({unit_m})", "=E7+E8", fmt_int_m, False),
+        (10, f"Cash & Marketable Securities ({unit_m})", float(meta["cash_and_investments_m"]), fmt_int_m, True),
+        (11, f"Preferred Stock ({unit_m})", float(meta.get("preferred_stock_m", 0.0)), fmt_int_m, True),
+        (12, f"Minority Interest ({unit_m})", float(meta.get("minority_interest_m", 0.0)), fmt_int_m, True),
+        (13, f"Net Debt ({unit_m})", "=E8-E10", fmt_int_m, False),
+        (14, f"Current Enterprise Value ({unit_m})", "=E7+E8+E11+E12-E10", fmt_int_m, False),
     ]
     for r, lbl, val, fmt, is_inp in bridge_right:
         ws_dcf.cell(r, 4, lbl).font = FONT_FORMULA_BOLD if r in (7, 14) else FONT_FORMULA
@@ -1141,7 +1185,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     ws_dcf.cell(23, 1, cf_label).font = FONT_FORMULA_BOLD
     ws_dcf.cell(24, 1, "Terminal Driver Metric (EBITDA or Cash Flow)").font = FONT_FORMULA
     ws_dcf.cell(25, 1, "Discount Factor").font = FONT_FORMULA
-    ws_dcf.cell(26, 1, "Present Value of Cash Flow ($M)").font = FONT_FORMULA_BOLD
+    ws_dcf.cell(26, 1, f"Present Value of Cash Flow ({unit_m})").font = FONT_FORMULA_BOLD
 
     for j, yr in enumerate(years_fc):
         col = 2 + j
@@ -1159,12 +1203,12 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
 
         ccf = ws_dcf.cell(23, col, f"='Historical & Forecast'!{proj_cl}{proj_rows['ufcf']}")
         ccf.font = FONT_LINK_BOLD
-        ccf.number_format = FMT_INT_M
+        ccf.number_format = fmt_int_m
 
         term_r = proj_rows["ufcf"] if model_type in ("financials_ddm", "reit_affo") else proj_rows["ebitda"]
         ctm = ws_dcf.cell(24, col, f"='Historical & Forecast'!{proj_cl}{term_r}")
         ctm.font = FONT_LINK
-        ctm.number_format = FMT_INT_M
+        ctm.number_format = fmt_int_m
 
         cdf = ws_dcf.cell(25, col, f"=1/((1+$B$15)^{cl}22)")
         cdf.font = FONT_FORMULA
@@ -1173,7 +1217,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         cpv = ws_dcf.cell(26, col, f"={cl}23*{cl}25")
         cpv.font = FONT_FORMULA_BOLD
         cpv.fill = FILL_TOTAL
-        cpv.number_format = FMT_INT_M
+        cpv.number_format = fmt_int_m
 
     first_fc_cl = get_column_letter(2)
     last_fc_cl = get_column_letter(1 + n_fc)
@@ -1187,19 +1231,19 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     ws_dcf.cell(29, 3).fill = FILL_SUBHDR
 
     bridge_calc_rows = [
-        (30, "PV of Explicit Forecast Cash Flows ($M)", f"=SUM({first_fc_cl}26:{last_fc_cl}26)", f"=SUM({first_fc_cl}26:{last_fc_cl}26)", FMT_INT_M, False),
-        (31, "Undiscounted Terminal Value ($M)", f"=({last_fc_cl}23*(1+$B$16))/($B$15-$B$16)", f"={last_fc_cl}24*$B$17", FMT_INT_M, False),
-        (32, "PV of Terminal Value ($M)", f"=B31*{last_fc_cl}25", f"=C31*{last_fc_cl}25", FMT_INT_M, False),
-        (33, "Implied Enterprise Value ($M)", "=B30+B32", "=C30+C32", FMT_INT_M, True),
+        (30, f"PV of Explicit Forecast Cash Flows ({unit_m})", f"=SUM({first_fc_cl}26:{last_fc_cl}26)", f"=SUM({first_fc_cl}26:{last_fc_cl}26)", fmt_int_m, False),
+        (31, f"Undiscounted Terminal Value ({unit_m})", f"=({last_fc_cl}23*(1+$B$16))/($B$15-$B$16)", f"={last_fc_cl}24*$B$17", fmt_int_m, False),
+        (32, f"PV of Terminal Value ({unit_m})", f"=B31*{last_fc_cl}25", f"=C31*{last_fc_cl}25", fmt_int_m, False),
+        (33, f"Implied Enterprise Value ({unit_m})", "=B30+B32", "=C30+C32", fmt_int_m, True),
         (
             34,
-            "Implied Equity Value ($M)",
+            f"Implied Equity Value ({unit_m})",
             "=B33" if model_type == "financials_ddm" else "=B33+$E$10-$E$8-$E$11-$E$12",
             "=C33" if model_type == "financials_ddm" else "=C33+$E$10-$E$8-$E$11-$E$12",
-            FMT_INT_M,
+            fmt_int_m,
             True,
         ),
-        (35, "Implied Intrinsic Value per Share ($)", "=B34/$E$6", "=C34/$E$6", FMT_CURR, True),
+        (35, f"Implied Intrinsic Value per Share ({cs})", "=B34/$E$6", "=C34/$E$6", fmt_curr, True),
         (36, "Implied Upside / (Downside) vs Current (%)", "=(B35/$E$5)-1", "=(C35/$E$5)-1", FMT_PCT, False),
         (
             37,
@@ -1231,10 +1275,10 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     # Section 4: Simultaneous Scenario Valuation Summary (Base / Bull / Bear Perpetuity & Exit Multiple)
     _style_section_bar(ws_dcf, 39, "4. Simultaneous Bull / Base / Bear Scenario Matrix (Live Formulas)", max_c_dcf)
     ws_dcf.cell(40, 1, "Scenario").font = FONT_TBL_HDR
-    ws_dcf.cell(40, 2, "PV Explicit CFs ($M)").font = FONT_TBL_HDR
-    ws_dcf.cell(40, 3, "PV Terminal (Perp) ($M)").font = FONT_TBL_HDR
-    ws_dcf.cell(40, 4, "Intrinsic Price - Perp ($)").font = FONT_TBL_HDR
-    ws_dcf.cell(40, 5, "Intrinsic Price - Exit Mult ($)").font = FONT_TBL_HDR
+    ws_dcf.cell(40, 2, f"PV Explicit CFs ({unit_m})").font = FONT_TBL_HDR
+    ws_dcf.cell(40, 3, f"PV Terminal (Perp) ({unit_m})").font = FONT_TBL_HDR
+    ws_dcf.cell(40, 4, f"Intrinsic Price - Perp ({cs})").font = FONT_TBL_HDR
+    ws_dcf.cell(40, 5, f"Intrinsic Price - Exit Mult ({cs})").font = FONT_TBL_HDR
     for col_i in range(1, 6):
         ws_dcf.cell(40, col_i).fill = FILL_SUBHDR
 
@@ -1253,7 +1297,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             r_s, 2, f"=NPV($B$15,'Historical & Forecast'!{first_proj_fc_cl}{r_cf_strip}:{last_proj_fc_cl}{r_cf_strip})"
         )
         c_pv.font = FONT_LINK
-        c_pv.number_format = FMT_INT_M
+        c_pv.number_format = fmt_int_m
 
         c_tvp = ws_dcf.cell(
             r_s,
@@ -1261,20 +1305,20 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             f"=(('Historical & Forecast'!{last_proj_fc_cl}{r_cf_strip}*(1+$B$16))/($B$15-$B$16))*{last_fc_cl}25",
         )
         c_tvp.font = FONT_LINK
-        c_tvp.number_format = FMT_INT_M
+        c_tvp.number_format = fmt_int_m
 
         bridge_adj = "" if model_type == "financials_ddm" else "+$E$10-$E$8-$E$11-$E$12"
         c_pp = ws_dcf.cell(r_s, 4, f"=(B{r_s}+C{r_s}{bridge_adj})/$E$6")
         c_pp.font = FONT_FORMULA_BOLD
-        c_pp.number_format = FMT_CURR
+        c_pp.number_format = fmt_curr
 
         tv_m_pv = f"(('Historical & Forecast'!{last_proj_fc_cl}{r_eb_strip}*$B$17)*{last_fc_cl}25)"
         c_pm = ws_dcf.cell(r_s, 5, f"=(B{r_s}+{tv_m_pv}{bridge_adj})/$E$6")
         c_pm.font = FONT_FORMULA_BOLD
-        c_pm.number_format = FMT_CURR
+        c_pm.number_format = fmt_curr
 
     # Section 5: 5x5 2D Sensitivity Matrix (WACC vs Terminal Growth Rate)
-    _style_section_bar(ws_dcf, 46, "5. Sensitivity Table: Intrinsic Share Price ($) - Discount Rate vs. Terminal Growth", max_c_dcf)
+    _style_section_bar(ws_dcf, 46, f"5. Sensitivity Table: Intrinsic Share Price ({cs}) - Discount Rate vs. Terminal Growth", max_c_dcf)
     ws_dcf.cell(47, 1, "WACC \\ Term. Growth").font = FONT_TBL_HDR
     g_deltas = [-0.010, -0.005, 0.0, 0.005, 0.010]
     w_deltas = [-0.010, -0.005, 0.0, 0.005, 0.010]
@@ -1304,7 +1348,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             scell.font = FONT_FORMULA_BOLD if (i_w == 2 and j_g == 2) else FONT_FORMULA
             if i_w == 2 and j_g == 2:
                 scell.fill = FILL_ACCENT
-            scell.number_format = FMT_CURR
+            scell.number_format = fmt_curr
             scell.border = BORDER_DATA
 
     # =========================================================================
@@ -1316,8 +1360,8 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     comp_headers = [
         ("Ticker", None),
         ("Company Name", None),
-        ("Market Cap ($M)", FMT_INT_M),
-        ("Enterprise Value ($M)", FMT_INT_M),
+        (f"Market Cap ({unit_m})", fmt_int_m),
+        (f"Enterprise Value ({unit_m})", fmt_int_m),
         ("Rev Growth (%)", FMT_PCT),
         ("EBITDA Margin (%)", FMT_PCT),
         ("ROE (%)", FMT_PCT),
@@ -1378,11 +1422,12 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             cl = get_column_letter(c_i)
             rng = f"{cl}{p_start}:{cl}{p_end}"
             if fn_kind in ("AVERAGE", "MEDIAN"):
-                f_str = f"={fn_kind}({rng})"
+                core_f = f"{fn_kind}({rng})"
             elif fn_kind == "P25":
-                f_str = f"=PERCENTILE.INC({rng},0.25)"
+                core_f = f"PERCENTILE.INC({rng},0.25)"
             else:
-                f_str = f"=PERCENTILE.INC({rng},0.75)"
+                core_f = f"PERCENTILE.INC({rng},0.75)"
+            f_str = f'=IF(COUNT({rng})>0,{core_f},"n/a")'
             sc = ws_comps.cell(r_st, c_i, f_str)
             sc.font = FONT_FORMULA_BOLD if r_st == r_median else FONT_FORMULA
             sc.fill = FILL_TOTAL
@@ -1401,24 +1446,24 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         (r_cal + 2, "Peer Median Benchmark Multiple (x)", f"={sel_col_letter}{r_median}", FMT_MULT, False),
         (r_cal + 3, "Target Quality / Growth Premium (Discount) %", float(rv.get("premium_discount_pct", 0.0)), FMT_PCT, True),
         (r_cal + 4, "Applied Target Multiple (x)", f"=B{r_cal + 2}*(1+B{r_cal + 3})", FMT_MULT, False),
-        (r_cal + 5, f"{meta['ticker']} Forward Metric ($M)", float(rv["company_forward_metric_m"]), FMT_INT_M, True),
+        (r_cal + 5, f"{meta['ticker']} Forward Metric ({unit_m})", float(rv["company_forward_metric_m"]), fmt_int_m, True),
         (
             r_cal + 6,
-            "Implied Enterprise Value from Comps ($M)",
+            f"Implied Enterprise Value from Comps ({unit_m})",
             f"=B{r_cal + 4}*B{r_cal + 5}" if is_ev_mult else f"=B{r_cal + 7}-'WACC & Intrinsic Value'!E10+'WACC & Intrinsic Value'!E8",
-            FMT_INT_M,
+            fmt_int_m,
             False,
         ),
         (
             r_cal + 7,
-            "Implied Equity Value from Comps ($M)",
+            f"Implied Equity Value from Comps ({unit_m})",
             f"=B{r_cal + 6}+'WACC & Intrinsic Value'!E10-'WACC & Intrinsic Value'!E8-'WACC & Intrinsic Value'!E11-'WACC & Intrinsic Value'!E12"
             if is_ev_mult
             else f"=B{r_cal + 4}*B{r_cal + 5}",
-            FMT_INT_M,
+            fmt_int_m,
             False,
         ),
-        (r_cal + 8, "Implied Share Price - Relative Valuation ($)", f"=B{r_cal + 7}/'WACC & Intrinsic Value'!E6", FMT_CURR, False),
+        (r_cal + 8, f"Implied Share Price - Relative Valuation ({cs})", f"=B{r_cal + 7}/'WACC & Intrinsic Value'!E6", fmt_curr, False),
     ]
     r_comps_price = r_cal + 8
     for r_c, lbl, val, fmt, is_inp in cal_rows:
@@ -1452,8 +1497,8 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
 
     bw = meta["blend_weights"]
     exec_top = [
-        (5, "Current Share Price ($)", "='WACC & Intrinsic Value'!E5", FMT_CURR, FONT_LINK),
-        (6, "Blended 12M Target Price ($)", "=SUMPRODUCT(C14:C16,D14:D16)", FMT_CURR, FONT_FORMULA_BOLD),
+        (5, f"Current Share Price ({cs})", "='WACC & Intrinsic Value'!E5", fmt_curr, FONT_LINK),
+        (6, f"Blended 12M Target Price ({cs})", "=SUMPRODUCT(C14:C16,D14:D16)", fmt_curr, FONT_FORMULA_BOLD),
         (7, "Implied Upside / (Downside) (%)", "=(B6/B5)-1", FMT_PCT, FONT_FORMULA_BOLD),
         (8, "IPS Minimum Buy Upside Hurdle (%)", float(meta["ips_buy_upside_hurdle"]), FMT_PCT, FONT_INPUT),
         (9, "IPS Sell Downside Trigger (%)", float(meta["ips_sell_upside_hurdle"]), FMT_PCT, FONT_INPUT),
@@ -1473,7 +1518,7 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
             c.number_format = fmt
 
     _style_section_bar(ws_exec, 12, "2. Blended Target Price Weights & Valuation Football Field", 7)
-    for idx_h, h_txt in enumerate(("Valuation Methodology", "Notes / Basis", "Implied Price ($)", "Target Weight (%)", "Weighted Contribution ($)", "vs. Current (%)"), start=1):
+    for idx_h, h_txt in enumerate(("Valuation Methodology", "Notes / Basis", f"Implied Price ({cs})", "Target Weight (%)", f"Weighted Contribution ({cs})", "vs. Current (%)"), start=1):
         hc = ws_exec.cell(13, idx_h, h_txt)
         hc.font = FONT_TBL_HDR
         hc.fill = FILL_SUBHDR
@@ -1489,14 +1534,14 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         ws_exec.cell(r, 2, m_note).font = FONT_NOTE
         cp = ws_exec.cell(r, 3, p_link)
         cp.font = FONT_LINK_BOLD
-        cp.number_format = FMT_CURR
+        cp.number_format = fmt_curr
         cw = ws_exec.cell(r, 4, w_val)
         cw.font = FONT_INPUT
         cw.fill = FILL_INPUT
         cw.number_format = FMT_PCT
         ccont = ws_exec.cell(r, 5, f"=C{r}*D{r}")
         ccont.font = FONT_FORMULA
-        ccont.number_format = FMT_CURR
+        ccont.number_format = fmt_curr
         cup = ws_exec.cell(r, 6, f"=(C{r}/$B$5)-1")
         cup.font = FONT_FORMULA
         cup.number_format = FMT_PCT
@@ -1507,12 +1552,12 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
     ws_exec.cell(17, 5, "=SUM(E14:E16)").font = FONT_FORMULA_BOLD
     ws_exec.cell(17, 5).fill = FILL_ACCENT
     ws_exec.cell(17, 5).border = BORDER_TOTAL
-    ws_exec.cell(17, 5).number_format = FMT_CURR
+    ws_exec.cell(17, 5).number_format = fmt_curr
     ws_exec.cell(17, 6, "=(E17/$B$5)-1").font = FONT_FORMULA_BOLD
     ws_exec.cell(17, 6).number_format = FMT_PCT
 
     _style_section_bar(ws_exec, 19, "3. Scenario Range (Bull / Base / Bear Intrinsic Value)", 7)
-    for idx_h, h_txt in enumerate(("Scenario", "Perpetuity Price ($)", "Upside (%)", "Exit Multiple Price ($)", "Upside (%)"), start=1):
+    for idx_h, h_txt in enumerate(("Scenario", f"Perpetuity Price ({cs})", "Upside (%)", f"Exit Multiple Price ({cs})", "Upside (%)"), start=1):
         hc = ws_exec.cell(20, idx_h, h_txt)
         hc.font = FONT_TBL_HDR
         hc.fill = FILL_SUBHDR
@@ -1523,13 +1568,13 @@ def build_valuation_workbook(spec: dict[str, Any], out_xlsx: Path) -> dict[str, 
         ws_exec.cell(r_e, 1, f"{sc_key.title()} Case").font = FONT_FORMULA_BOLD
         c1 = ws_exec.cell(r_e, 2, f"='WACC & Intrinsic Value'!D{r_dcf_s}")
         c1.font = FONT_LINK_BOLD
-        c1.number_format = FMT_CURR
+        c1.number_format = fmt_curr
         c2 = ws_exec.cell(r_e, 3, f"=(B{r_e}/$B$5)-1")
         c2.font = FONT_FORMULA
         c2.number_format = FMT_PCT
         c3 = ws_exec.cell(r_e, 4, f"='WACC & Intrinsic Value'!E{r_dcf_s}")
         c3.font = FONT_LINK
-        c3.number_format = FMT_CURR
+        c3.number_format = fmt_curr
         c4 = ws_exec.cell(r_e, 5, f"=(D{r_e}/$B$5)-1")
         c4.font = FONT_FORMULA
         c4.number_format = FMT_PCT
@@ -1617,9 +1662,10 @@ def main() -> int:
         out_sum.parent.mkdir(parents=True, exist_ok=True)
         out_sum.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
+        csym_out, *_ = _currency_formats(summary.get("currency", "USD"))
         print(
             f"Built {out_xlsx} ({summary['formula_audit']['live_formula_cells']} live formulas, 0 errors) | "
-            f"Target: ${summary['blended_target_price']:.2f} ({summary['implied_upside_pct']:+.1f}%) -> {summary['rating']}"
+            f"Target: {csym_out}{summary['blended_target_price']:.2f} ({summary['implied_upside_pct']:+.1f}%) -> {summary['rating']}"
         )
         print(f"Saved valuation summary JSON to {out_sum}")
     except PermissionError as exc:

@@ -63,12 +63,19 @@ Consult:
 ### Phase 5: Two-Tier Thesis-Linked 5-Year Excel Valuation
 1. Read `memory/client_ips.md` (`buy_min_upside_pct`, `sell_max_upside_pct`) and [references/sector-valuation-guide.md](references/sector-valuation-guide.md) (run `uv run <SCRIPTS>/valuation_excel.py --write-sample-spec` if needed to inspect the exact JSON schema).
 2. Assemble `memory/<TICKER>/valuation_spec.json` enforcing the **Two-Tier Assumption Rule**:
+   - Set `"ebit_includes_sbc": true` inside `meta` whenever `ebit_margin` is modeled on a GAAP/IFRS (post-SBC) basis so `Memo: Cash Flow ex-SBC` does not double-deduct SBC; keep operating leases excluded from financial debt when EBITDA already deducts rent.
    - Populate `"thesis_pillars"` (`T1..Tn`) with `id`, `title`, `summary`, `impacted_drivers`, `model_impact`, and `bull_bear_flex`.
    - Populate `"assumption_basis"` across all 8 tracked drivers (`revenue_growth`, `ebit_margin`, `capex_pct_rev`, `premium_discount_pct`, `tax_rate`, `da_pct_rev`, `nwc_pct_delta_rev`, `sbc_pct_rev`): link Key Drivers impacted by the thesis via `"basis_type": "thesis"` + `"thesis_ids": ["T1", ...]`, and anchor unchanged/structural drivers via `"basis_type": "historical_or_market"` + `"historical_anchor"` citing 3-5Y SEC actuals.
-   - Calibrate explicit 5-year (`len(forecast.years) == 5`) Base, Bull, and Bear paths with Year 5 tapering to normalized terminal reinvestment, CAPM/WACC inputs, and justified peer multiple calibration.
+   - Calibrate explicit 5-year (`len(forecast.years) == 5`) Base, Bull, and Bear paths with Year 5 tapering to normalized terminal reinvestment, uniform dated CAPM `Rf`/`ERP` anchors across same-market peers, time-aligned Comps multiples (`trailing` vs `forward`), and tight Perpetuity-vs-Exit multiple consistency.
 3. Build and audit the live-formula `.xlsx` workbook:
    ```powershell
    uv run <SCRIPTS>/valuation_excel.py --spec memory/<TICKER>/valuation_spec.json --out-xlsx Output/models/<TICKER>_valuation.xlsx --out-summary memory/<TICKER>/valuation_summary.json
    ```
 4. Verify `memory/<TICKER>/valuation_summary.json`: confirm `formula_audit.status == "PASS"`, `error_cells` is empty, and Base-case `share_price_perpetuity` vs. `share_price_exit_multiple` spread is within `35%` (recalibrating inconsistent terminal inputs transparently if needed). Log completion via `decision_log.py`.
 5. **Completion criterion:** `Output/models/<TICKER>_valuation.xlsx` and `memory/<TICKER>/valuation_summary.json` pass all formula, bidirectional `T1..Tn` thesis-linkage, and terminal convergence checks.
+
+### Phase 6: 1-Iteration Master-Agent Rewrite from Verification Feedback (Before Final Delivery)
+1. When the independent Cross-Model Verification Agent (`claude-sonnet-5-5-high` via `swarm`) pushes structured feedback (`memory/trail_audit.md` + board post to `@coordinator`) flagging calibration, accounting, `Rf`/`ERP`, Comps time-basis, or thesis gaps (`VERDICT: REVISE_REQUIRED` or actionable analytical improvements):
+   - Do **not** bounce findings back to individual researcher subagents. The **master (coordinator) agent directly executes `1` single rewrite iteration** across affected `memory/<TICKER>/analyst_dossier.md` and `memory/<TICKER>/valuation_spec.json` (plus any shared `src/` fixes).
+   - Re-run `valuation_excel.py` (`0` error cells), immediately rewrite the paired `memory/<TICKER>/report_draft.md` and re-export the PDF (`audit_report.py --strict-slop --export-pdf`, `0` errors, `0` warnings) per `research-report` Step 4, and log the rewrite in `memory/decisions.tsv`.
+2. **Completion criterion:** All actionable reviewer items are incorporated within **`1` master-agent rewrite iteration** and confirmed via a single final sign-off (`VERDICT: PASS`; any residual non-blocking watch items go into `## Attention`, never starting a 2nd rewrite cycle) before final presentation to the user.
